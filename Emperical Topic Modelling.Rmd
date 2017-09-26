@@ -1,0 +1,463 @@
+---
+title: "Empirical Topic Modeling"
+author: "Rajiv V"
+date: "13 December 2016"
+output: html_document
+---
+
+With bulky volumes of information coming from various sources and with the large reports of data in front of the executives, it's really hard for anyone to go through them in a given time frame. So, in order to give a summary what the whole data is saying will make lives easier. In this page we are going to describe the process of analyzing huge corpus of data and how to interpret the topics in any given data. 
+
+Here we are going to demonstrate this by Scraping the data of three completely diverse topics from the Google search results. Mix all the data into one single corpus. After that, we should be able to distinguish and identify the topics that we picked from the results at the end of this exercise.
+
+This document is published in RPubs and can be found here:  <http://rpubs.com/rajiv2806/Empirical_Topic_Modeling>
+
+
+## Technical Analysis
+
+Loading the below packages that will be useful for our analysis.
+
+```{r Package_Loading, message=FALSE, warning=FALSE}
+rm(list=ls())                   # Clear workspace
+library(text2vec)
+library(data.table)
+library(stringr)
+library(tm)
+library(RWeka)
+library(tokenizers)
+library(slam)
+library(wordcloud)
+library(igraph)
+library(maptpx)
+library(RCurl)
+```
+
+Reading the three topic files into our program. In case if there are any empty documents in these individual corpuses they are removed.
+
+```{r data_input}
+# reading files
+file.cr = read.csv(text = getURL("https://raw.githubusercontent.com/Rajiv2806/Empirical-Topic-Modeling/master/Finance%20_google_search.csv"))
+file.mi = read.csv(text = getURL("https://raw.githubusercontent.com/Rajiv2806/Empirical-Topic-Modeling/master/Spiritual%20_google_search.csv"))
+file.lin = read.csv(text = getURL("https://raw.githubusercontent.com/Rajiv2806/Empirical-Topic-Modeling/master/Tennis%20_google_search.csv"))
+
+# Removing empty documents
+file.cr = file.cr[!is.na(file.cr$text)|file.cr$text != '',]
+file.mi = file.mi[!is.na(file.mi$text)|file.mi$text != '',]
+file.lin = file.lin[!is.na(file.lin$text)|file.lin$text != '',]
+```
+
+All the data that is extracted is put into a structured manner into a Data Frame.
+The data frame consists of the documents that are extracted along with an unique id given to each document.
+The structure of the Data Frame we created is displayed below.
+
+```{r Creating_DF}
+n = min(nrow(file.cr),nrow(file.mi),nrow(file.lin)) #A variable to hold the min no. of documents in all three corpuses.
+
+data = data.frame(id = 1:n, text1 = file.cr$text[1:n], #creating a dataframe
+                      text2 = file.mi$text[1:n],
+                      text3 = file.lin$text[1:n],
+                      stringsAsFactors = F)
+data$text = paste(data$text1,data$text2,data$text3) #creating a new column by concatenating all three topics data
+
+dim(data)
+```
+
+We should remove the words that do not make much sense, but will be used more frequently. These are called stop words. This below code defines all the stop words that are to be removed as in general.
+
+```{r Stopwords}
+stpw1 = readLines('https://raw.githubusercontent.com/sudhir-voleti/basic-text-analysis-shinyapp/master/data/stopwords.txt') # stopwords list from git
+stpw2 = tm::stopwords('english')               # tm package stop word list; tokenizer package has the same name function
+stpw3 = c('park')
+comn  = unique(c(stpw1, stpw2,stpw3))   # Union of two list #'solid state chemistry','microeconomics','linguistic'
+stopwords = unique(gsub("'"," ",comn))  # final stop word lsit after removing punctuation
+```
+
+Along with stop words Our corpus needs to be free from all the things like the ASCII characters, alphanumeric characters, html tags etc.., that will not be helping us in any way in topic interpretation.
+
+So, below is a user-defined function that when applied will return us a cleaned corpus.
+
+```{r textclean_function}
+text.clean = function(x)                    # text data
+{ require("tm")
+  x  =  gsub("<.*?>", " ", x)               # regex for removing HTML tags
+  x  =  iconv(x, "latin1", "ASCII", sub="") # Keep only ASCII characters
+  x  =  gsub("[^[:alnum:]]", " ", x)        # keep only alpha numeric 
+  x  =  tolower(x)                          # convert to lower case characters
+  x  =  removeNumbers(x)                    # removing numbers
+  x  =  stripWhitespace(x)                  # removing white space
+  x  =  gsub("^\\s+|\\s+$", "", x)          # remove leading and trailing white space
+  return(x)
+}
+```
+
+
+In this stage we are applying the text_clean function defined above, removing the stopwords and the white space characters.
+
+```{r Cleaned_data}
+x  = text.clean(data$text)             # pre-process text corpus
+x  =  removeWords(x,stopwords)         # removing stopwords created above
+x  =  stripWhitespace(x)               # removing white space
+```
+
+We shall create a Document term Matrix DTM. DTM is a matrix which says the frequency of each term(a single word) present in the corpus.
+
+This is done by first creating Bi-Grams and taking their frequency. Bi-Grams are the words which appear in succession.
+These Bi-Grams are then combined with the uni-Grams to create a final DTM.
+
+The Structure of the final DTM is displayed below.
+
+```{r DTM_Creation}
+#t1 = Sys.time()
+
+tok_fun = word_tokenizer
+it_0 = itoken( x,tokenizer = tok_fun,ids = data$id,progressbar = F)
+vocab = create_vocabulary(it_0,ngram = c(2L, 2L))
+pruned_vocab = prune_vocabulary(vocab,term_count_min = 10) # doc_proportion_max = 0.5,# doc_proportion_min = 0.001)
+vectorizer = vocab_vectorizer(pruned_vocab)
+dtm_0  = create_dtm(it_0, vectorizer)
+
+# Sort bi-gram with decreasing order of freq
+tsum = as.matrix(t(rollup(dtm_0, 1, na.rm=TRUE, FUN = sum))) # find sum of freq for each term
+tsum = tsum[order(tsum, decreasing = T),]       #terms in decreasing order of freq
+#head(tsum);  #tail(tsum)
+
+# select Top 1000 bigrams to unigram
+if (length(tsum) > 1000) {n = 1000} else {n = length(tsum)}
+tsum = tsum[1:n]
+
+#-------------------------------------------------------
+# Code bi-grams as unigram in clean text corpus
+
+text2 = x
+text2 = paste("",text2,"")
+
+#pb <- txtProgressBar(min = 1, max = (length(tsum)), style = 3) ; i = 0
+
+for (term in names(tsum)){
+  #i = i + 1
+  focal.term = gsub("_", " ",term)        # in case dot was word-separator
+  replacement.term = term
+  text2 = gsub(paste("",focal.term,""),paste("",replacement.term,""), text2)
+  #setTxtProgressBar(pb, i)
+}
+
+it_m = itoken(text2,tokenizer = tok_fun,ids = data$id,progressbar = F)  # preprocessor = text.clean,
+vocab = create_vocabulary(it_m)   # ngram = c(2L, 2L),  #stopwords = stopwords
+pruned_vocab = prune_vocabulary(vocab,term_count_min = 1) # doc_proportion_max = 0.5,# doc_proportion_min = 0.001)
+vectorizer = vocab_vectorizer(pruned_vocab)
+dtm_m  = create_dtm(it_m, vectorizer)
+#dim(dtm_m)
+
+dtm = as.DocumentTermMatrix(dtm_m, weighting = weightTf)
+
+#print(difftime(Sys.time(), t1, units = 'sec'))
+
+# some basic clean-up ops
+dim(dtm)
+```
+
+So there are 51 Documents and 19,056 distinct Tokens (Words) in our corpus.
+
+From the DTM we create the word cloud. This Word Cloud is a visual representation of the individual terms and their frequency in terms of size of that term in the plot. 
+
+From the Plot we can Clearly distinguish each of our three subjects we choose at the beginning. They are Tennis, Spirituality, Finance. And also we can see some major words which are closely related with these subjects are also clearly visible.
+
+```{r Dtm_Wordcloud, message=FALSE, warning=FALSE}
+a0 = apply(dtm, 1, sum)   # apply sum operation to dtm's rows. i.e. get rowSum
+  dtm = dtm[(a0 > 5),]    # retain only those rows with token rowSum >5, i.e. delete empty rows
+  #dim(dtm);
+  rm(a0)        # delete a0 object
+
+a0 = apply(dtm, 2, sum)   # use apply() to find colSUms this time
+  dtm = dtm[, (a0 > 4)]     # retain only those terms that occurred > 4 times in the corpus
+  #dim(dtm); 
+  rm(a0)
+
+# view summary wordlcoud
+a0 = apply(dtm, 2, sum)     # colSum vector of dtm
+  #a0[1:5]                   # view what a0 obj is like
+  a1 = order(as.vector(a0), decreasing = TRUE)     # vector of token locations
+  a0 = a0[a1]     # a0 ordered asper token locations
+  #a0[1:5]         # view a0 now
+
+#windows() # opens new image window
+wordcloud(names(a0), a0,     # invoke wordcloud() func. Use ?wordcloud for more info
+          scale=c(4,.5), 
+          3, # min.freq 
+          max.words = 200,
+          colors = brewer.pal(8, "Dark2"), use.r.layout = FALSE)
+title(sub = "Quick Summary Wordcloud")
+```
+
+We not only wanted to check which terms appeared most frequently in the corpus. We might also want to know which tokens tend to most occur together within a Document. 
+
+Term Co-Occurrence Matrix TCM shows us the terms that are mostly co-appearing in the same document. 
+
+The advantage of these over DTM's is that, in a DTM words are considered only if they appear in succession (Bi-Grams, Tri-Grams etc..,). But TCM can say how combination of words appears in a single document.
+
+```{r TCM}
+pruned_vocab = prune_vocabulary(vocab,term_count_min = 5)
+vectorizer = vocab_vectorizer(pruned_vocab) # , grow_dtm = FALSE, skip_grams_window = 3L)
+tcm = create_tcm(it_m, vectorizer)
+tcm.mat = as.matrix(tcm)
+adj.mat = tcm.mat + t(tcm.mat)
+
+# how about a quick view of the distilled COG as well, now that we're here?
+diag(adj.mat) = 0     # set diagonals of the adj matrix to zero --> node isn't its own neighor
+a0 = order(apply(adj.mat, 2, sum), decreasing = T)
+adj.mat = as.matrix(adj.mat[a0[1:50], a0[1:50]])
+```
+
+Plotting a COG. A COG is a Visual representation of a TCM. Usually a normal COG will look very clumsy and is not easily readable for a normal user.
+
+So, we define a function to plot the COG in an easily interpretable way and it is called as distilled COG.
+
+The Green Nodes are the central Nodes, which get lot of connections. They are present in most of the Co-Occurrences. The Pink nodes appearing around that central node are called as Peripheral nodes. 
+
+```{r UDF_Distilled_COG}
+distill.cog = function(mat1, # input TCM ADJ MAT
+                       title, # title for the graph
+                       s,    # no. of central nodes
+                       k1){  # max no. of connections  
+  
+  a = colSums(mat1) # collect colsums into a vector obj a
+  b = order(-a)     # nice syntax for ordering vector in decr order  
+  
+  mat2 = mat1[b,b]  #
+  
+  diag(mat2) =  0
+  
+  ## +++ go row by row and find top k adjacencies +++ ##
+  
+  wc = NULL
+  
+  for (i1 in 1:s){ 
+    thresh1 = mat2[i1,][order(-mat2[i1, ])[k1]]
+    mat2[i1, mat2[i1,] < thresh1] = 0   # wow. didn't need 2 use () in the subset here.
+    mat2[i1, mat2[i1,] > 0 ] = 1
+    word = names(mat2[i1, mat2[i1,] > 0])
+    mat2[(i1+1):nrow(mat2), match(word,colnames(mat2))] = 0
+    wc = c(wc,word)
+  } # i1 loop ends
+  
+  mat3 = mat2[match(wc, colnames(mat2)), match(wc, colnames(mat2))]
+  ord = colnames(mat2)[which(!is.na(match(colnames(mat2), colnames(mat3))))]  # removed any NAs from the list
+  mat4 = mat3[match(ord, colnames(mat3)), match(ord, colnames(mat3))]
+  graph <- graph.adjacency(mat4, mode = "undirected", weighted=T)    # Create Network object
+  graph = simplify(graph) 
+  V(graph)$color[1:s] = "green"
+  V(graph)$color[(s+1):length(V(graph))] = "pink"
+ 
+  graph = delete.vertices(graph, V(graph)[ degree(graph) == 0 ])
+  plot(graph,layout = layout.kamada.kawai,main = title)
+
+  } # func ends
+```
+
+Distilled COG: 
+The COG Clearly says which are the three Major Subjects in our corpus that we considered. that is they are Tennis, Spiritual and Finance along with some terms such as Home, World, news etc.., 
+
+```{r Distilled_COG, message=FALSE, warning=FALSE}
+#windows()
+distill.cog(adj.mat, 'Distilled COG for full corpus',  7,  5)
+```
+
+# Topic Modelling
+In the below code, we try to separate the combined corpus into three separate topics. 
+The Number of topics that we need to analyze are 3, so we take the "K" value equal to 3.
+
+
+```{r Compute_theta_omega}
+K = 3     # overriding model fit criterion
+
+# -- run topic model for selected K -- #
+#summary( simfit <- topics(dtm,  K=K, verb=2), nwrd = 12 )
+simfit <- topics(dtm,  K=K, verb=2)
+rownames1 = gsub(" ", ".", rownames(simfit$theta));  rownames(simfit$theta) = rownames1;  
+```
+
+A look into the actual dimension's of the DTM says that there are 51 documents and 5316 unique terms in the corpus.
+We need to Factorize the Components of the Document Term Matrix, DTM in order to extract our latent topics out of it.
+
+```{r Dimensions_dtm}
+## what are the factor components of the factorized DTM?
+dim(dtm)     # size of the orig input matrix
+```
+
+Since we are trying to extract three topics out of the DTM. The "simfit" object created above has the splits the DTM into two, with a factor of 3.
+
+So, our DTM Matrix will be split into two matrices of 5316 X 3 and 51 X 3. The first one is called Theta matrix and the Second one is called Omega matrix.
+
+Theta Matrix is also called as Factor Loading matrix. This gives, each term's probability of belonging to a topic.
+Omega Matrix is called Factor Scores Matrix. This tells, how much proportion of each document contains each topic.
+
+The dimensions and the sample structure of the Theta and Omega Matrix is shown below.
+
+```{r theta_omega}
+#str(simfit)     # structure of the output obj
+dim(simfit$theta); simfit$theta[1:5,]  # analogous to factor loadings
+dim(simfit$omega); simfit$omega[1:5,]  # analogous to factor scores 
+```
+
+Now we will calculate the LIFT scores for each term in each topic.
+Since some topics have higher term frequency than others, controlling for their higher occurrence yields a normalized measure of token importance of a topic. This is called LIFT Score. 
+
+LIFT SCORE is also said the "measure of token importance of a topic".
+
+A Final Censored LIFT Matrix is displayed below, by highlighting only the topics which are of high importance in a topic Zeroing the other topics.
+
+```{r Compute_LIFT}
+tst = round(ncol(dtm)/100)
+a = rep(tst,99)
+b = cumsum(a);rm(a)
+b = c(0,b,ncol(dtm))
+
+ss.col = c(NULL)
+for (i in 1:(length(b)-1)) {
+  tempdtm = dtm[,(b[i]+1):(b[i+1])]
+  s = colSums(as.matrix(tempdtm))
+  ss.col = c(ss.col,s)
+  #print(i)
+}
+
+theta = simfit$theta
+lift = theta*0;       # lift will have same dimn as the theta matrix
+
+sum1 = sum(dtm)
+pterms = ss.col/sum1     # each column's marginal occurrence probability
+
+for (i in 1:nrow(theta)){  
+  for (j in 1:ncol(theta)){
+    ptermtopic = 0; pterm = 0;
+    ptermtopic = theta[i, j]
+    pterm = pterms[i]
+    lift[i, j] = ptermtopic/pterm     # divide each cell by the column's marg. occurr. proby.
+  }
+}   
+
+#dim(lift); head(lift, 15)
+#lift[1125:1135,]
+# Generate A censored Lift matrix
+censored.lift = lift
+for (i in 1:nrow(lift)){
+  censored.lift[i,][censored.lift[i,] < max(censored.lift[i,])] = 0   # hard assigning tokens to topics
+} 
+dim(censored.lift); censored.lift[1120:1125,]
+```
+
+Lift scores for each token for each topic are analysed. Now, we take all the tokens in each document and sum up their Lift scores in each topic. So, For each document we get three different scores. This is called ETA Score.
+
+So our ETA is an 51 X 3 Matrix with documents and their ETA Scores.
+
+Below is shown an ETA Proportion matrix which will sum all the topic scores in the document and then each topic score is divided with the total sum to get the proportion of topic importance of that document.
+
+```{r compute_ETA}
+#t = Sys.time()
+
+if(nrow(dtm) < 100) {k1 = 10} else {k1= 100}   # to avoid machine choking up in v small datasets
+
+tst = ceiling(nrow(dtm)/k1)  # now using 1% of the rows at a time
+a = rep(tst, (k1 - 1))
+b = cumsum(a);rm(a)    # cumsum() is cumulative sum.
+b = c(0, b, nrow(dtm))  # broke the supermassive dtm into chunks of 1% ncol each
+  a0 = which(b > nrow(dtm));    # sometimes, rounding errors cause out of bound errors
+  if (length(a0) > 0) {b = b[-a0]}
+
+eta.new = NULL
+for (i1 in 1:K){
+  
+  a2 = c(NULL)
+  for (i in 1:(length(b)-1)) {
+    tempdtm = dtm[(b[i]+1):(b[i+1]),]
+    a = matrix(rep(lift[, i1], nrow(tempdtm)), nrow(tempdtm), ncol(tempdtm), byrow = TRUE)
+    a1 = rowSums(as.matrix(tempdtm * a))
+    a2 = c(a2, a1); rm(a, a1, tempdtm)
+      } # i ends
+  
+  eta.new = cbind(eta.new, a2); rm(a2)
+  
+  } # i1 ends
+
+#Sys.time() - t  # will take longer than lift building coz ncol is v v high now
+
+rownames(eta.new) = rownames(simfit$omega)
+colnames(eta.new) = colnames(simfit$theta)
+
+# so what does eta.new look like? what does it mean?
+#dim(eta.new); head(eta.new)
+
+# eta.new = simfit$theta     # if error is happening, worst case
+
+eta.propn = eta.new / rowSums(eta.new)   # calc topic proportions for each document
+dim(eta.propn);  eta.propn [1:5,]
+```
+
+The word Cloud and COG are plotted for each topic separately below.
+
+We can make Interpretation of the topics derived here.
+
+For Topic 1: In Word Cloud we can see words like Business, Management, Financial management, financial, students etc.., and the co-Occurrence graph COG say's that Business-management, professional-students, international-Business are most repeated terms in same document in this topic. So from all these terms, in our context we can conclude that the Topic-1 is mostly related to "Finance".
+
+For Topic 2: In Word Cloud we can see words like Park, Meditation, spirituality, life events, God etc.., and the co-Occurrence graph COG say's that life-experience, free-events, find-Spirituality  are most repeated terms in same document in this topic. So from all these terms, in our context we can conclude that the Topic-2 is mostly related to "Spiritual".
+
+For Topic 3: In Word Cloud we can see words like tennis, andy Murray, world tour, atp, sports etc.., Along with them a Major portion of spirituality word is also seems to appear, this we will ignore in this case. This scenario could have been over come by increasing the value of K. The co-Occurrence graph COG say's that top-tennis, tennis-news, home-players, home-time are most repeated terms. So from all these terms, in our context we can conclude that the Topic-3 is mostly related to "Tennis".
+
+
+```{r topic_wordclouds, message=FALSE, warning=FALSE}
+df.top.terms = data.frame(NULL)    # can't fit ALL terms in plot, so choose top ones with max loading
+
+for (i in 1:K){       # For each topic 
+  a0 = which(censored.lift[,i] > 1) # terms with lift greator than 1 for topic i
+  freq = theta[a0, i] # Theta for terms greator than 1
+  freq = sort(freq, decreasing = T) # Terms with higher probilities for topic i
+  
+  # Auto Correction -  Sometime terms in topic with lift above 1 are less than 100. So auto correction
+  n = ifelse(length(freq) >= 100, 100, length(freq))
+  top_word = as.matrix(freq[1:n])
+  
+  top.terms = row.names(top_word)
+  df.top.terms.t = data.frame(topic = i, top.terms =top.terms, stringsAsFactors = F )
+  df.top.terms = rbind(df.top.terms, df.top.terms.t  )
+  
+} # i loop ends
+
+# pdf(file = paste0(K,' Topic Model results.pdf')) # use pdf() func to save plot directly as PDFs in your getwd()
+
+
+for (i in 1:K){       # For each topic 
+  
+  a0 = which(censored.lift[,i] > 1) # terms with lift greator than 1 for topic i
+  freq = theta[a0,i] # Theta for terms greator than 1
+  freq = sort(freq, decreasing = T) # Terms with higher probilities for topic i
+  
+# Auto Correction -  Sometime terms in topic with lift above 1 are less than 100. So auto correction
+  n = ifelse(length(freq) >= 100, 100, length(freq))
+  top_word = as.matrix(freq[1:n])
+  
+  # SUB TCM
+  sub.tcm = adj.mat[colnames(adj.mat) %in% names(a0),colnames(adj.mat) %in% names(a0)]
+  
+  #   Plot wordcloud
+  #windows()
+  wordcloud(rownames(top_word), top_word,  scale=c(4,.5), 1,
+            random.order=FALSE, random.color=FALSE, 
+           colors=brewer.pal(8, "Dark2"), use.r.layout = FALSE)
+  mtext(paste("Latent Topic",i), side = 3, line = 2, cex=2)
+
+  # PLot TCM
+  #windows()
+  distill.cog(sub.tcm, '',  5,  5)
+  mtext(paste("Term co-occurrence - Topic",i), side = 3, line = 2, cex=2)
+
+  } # i loop ends
+
+```
+
+
+## Learning's - Conclusion
+What we have Learnt from this Exercise is that:
+
+1. We were able to clearly seperate the topics from one other from a text corpus. There was a little overlap in the Topic - 3, but we could have over come this by increasing the value of K.
+
+2. Tokens such as Program, budget, spiritual are few terms that seems to have appeared in more than one single topic. The Lift scores are able to interpret which tokens weigh more on a topic. The ETA scores were able to say which Documents are having the highest topic weight.
+
+3. Plotting the Word Clouds and COG's for the Term Frequency's as a whole and plotting them seperately for each topic made us understand how we are able to distinguish the Themes in a given text. The Lift Scores, ETA Scores said us importance of each term and importance of each document in a given topic.  
